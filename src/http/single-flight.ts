@@ -33,10 +33,10 @@ export class SingleFlight<K, V> {
     }
 
     entry.subscribers += 1;
-    return this.#subscribe(entry, signal);
+    return this.#subscribe(key, entry, signal);
   }
 
-  #subscribe(entry: FlightEntry<V>, signal?: AbortSignal): Promise<V> {
+  #subscribe(key: K, entry: FlightEntry<V>, signal?: AbortSignal): Promise<V> {
     return new Promise<V>((resolve, reject) => {
       let finished = false;
       const finish = (callback: () => void) => {
@@ -46,6 +46,7 @@ export class SingleFlight<K, V> {
         entry.subscribers -= 1;
         callback();
         if (entry.subscribers === 0 && !entry.settled) {
+          if (this.#flights.get(key) === entry) this.#flights.delete(key);
           entry.controller.abort(new DOMException("All subscribers cancelled.", "AbortError"));
         }
       };

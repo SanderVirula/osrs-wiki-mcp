@@ -16,6 +16,11 @@ interface CachedJsonEnvelope {
   byteLength: number;
 }
 
+interface SharedJsonEnvelope {
+  envelope: CachedJsonEnvelope;
+  fromCache: boolean;
+}
+
 export interface JsonEnvelope<T> {
   data: T;
   fetchedAt: string;
@@ -24,6 +29,7 @@ export interface JsonEnvelope<T> {
 }
 
 export interface JsonRequestOptions<T> {
+  /** Must uniquely identify the canonical URL and upstream envelope type. */
   cacheKey: string;
   toolDeadline: Deadline;
   validate(value: unknown): T;
@@ -37,7 +43,7 @@ export interface JsonHttpClientOptions {
   userAgent?: string;
   semaphore?: Semaphore;
   cache?: ByteLruCache<string, CachedJsonEnvelope>;
-  singleFlight?: SingleFlight<string, CachedJsonEnvelope>;
+  singleFlight?: SingleFlight<string, SharedJsonEnvelope>;
 }
 
 export class JsonHttpClient {
@@ -47,7 +53,7 @@ export class JsonHttpClient {
   readonly #userAgent: string;
   readonly #semaphore: Semaphore;
   readonly #cache: ByteLruCache<string, CachedJsonEnvelope>;
-  readonly #singleFlight: SingleFlight<string, CachedJsonEnvelope>;
+  readonly #singleFlight: SingleFlight<string, SharedJsonEnvelope>;
 
   constructor({
     fetchImpl = fetch,
@@ -56,7 +62,7 @@ export class JsonHttpClient {
     userAgent = USER_AGENT,
     semaphore = new Semaphore(1),
     cache = new ByteLruCache<string, CachedJsonEnvelope>({ clock }),
-    singleFlight = new SingleFlight<string, CachedJsonEnvelope>(),
+    singleFlight = new SingleFlight<string, SharedJsonEnvelope>(),
   }: JsonHttpClientOptions = {}) {
     this.#fetch = fetchImpl;
     this.#clock = clock;
@@ -68,28 +74,44 @@ export class JsonHttpClient {
   }
 
   async request<T>(url: string | URL, options: JsonRequestOptions<T>): Promise<JsonEnvelope<T>> {
+    if (options.signal?.aborted) throw abortReason(options.signal);
+    if (options.toolDeadline.expired()) throw timeoutFailure();
+
     const cached = this.#cache.get(options.cacheKey);
     if (cached) return this.#validatedEnvelope(cached, options.validate, true);
 
-    const networkEnvelope = await this.#singleFlight.run(
-      options.cacheKey,
+    // Every caller keeps its own 30-second tool budget even when it joins a shared flight.
+    const subscriberGuard = createDeadlineGuard(
+      this.#clock,
+      options.toolDeadline,
       options.signal,
-      async (underlyingSignal) => {
-        const repeatedCacheHit = this.#cache.get(options.cacheKey);
-        if (repeatedCacheHit) return repeatedCacheHit;
-
-        const envelope = await this.#requestNetwork(
-          String(url),
-          options.toolDeadline,
-          underlyingSignal,
-          options.validate,
-        );
-        this.#cache.set(options.cacheKey, envelope);
-        return envelope;
-      },
     );
+    try {
+      const sharedEnvelope = await this.#singleFlight.run(
+        options.cacheKey,
+        subscriberGuard.signal,
+        async (underlyingSignal) => {
+          const repeatedCacheHit = this.#cache.get(options.cacheKey);
+          if (repeatedCacheHit) return { envelope: repeatedCacheHit, fromCache: true };
 
-    return this.#validatedEnvelope(networkEnvelope, options.validate, false);
+          const envelope = await this.#requestNetwork(
+            String(url),
+            underlyingSignal,
+            options.validate,
+          );
+          this.#cache.set(options.cacheKey, envelope);
+          return { envelope, fromCache: false };
+        },
+      );
+
+      return this.#validatedEnvelope(
+        sharedEnvelope.envelope,
+        options.validate,
+        sharedEnvelope.fromCache,
+      );
+    } finally {
+      subscriberGuard.dispose();
+    }
   }
 
   #validatedEnvelope<T>(
@@ -112,37 +134,44 @@ export class JsonHttpClient {
 
   async #requestNetwork<T>(
     url: string,
-    toolDeadline: Deadline,
     signal: AbortSignal,
     validate: (value: unknown) => T,
   ): Promise<CachedJsonEnvelope> {
-    const requestDeadline = toolDeadline.child(REQUEST_BUDGET_MS);
     const release = await this.#semaphore.acquire(signal);
+    // Serialized queueing consumes subscriber tool budgets. The outbound request's
+    // separate 20-second budget begins only once its upstream slot is acquired.
+    const requestDeadline = Deadline.after(this.#clock, REQUEST_BUDGET_MS);
+    const requestGuard = createDeadlineGuard(this.#clock, requestDeadline, signal);
+    const requestSignal = requestGuard.signal;
     try {
-      if (toolDeadline.expired() || requestDeadline.expired()) throw timeoutFailure();
+      // Keep the slot across bounded retry waits so Retry-After acts as a
+      // process-wide upstream backoff instead of allowing another request through.
+      if (requestDeadline.expired()) throw timeoutFailure();
 
       for (let attempt = 0; attempt < 3; attempt += 1) {
-        if (signal.aborted) throw abortReason(signal);
-        if (toolDeadline.expired() || requestDeadline.expired()) throw timeoutFailure();
+        if (requestSignal.aborted) throw abortReason(requestSignal);
+        if (requestDeadline.expired()) throw timeoutFailure();
 
         let response: Response;
         try {
-          response = await this.#fetch(url, {
-            headers: {
-              accept: "application/json",
-              "user-agent": this.#userAgent,
-            },
-            signal,
-          });
+          response = await raceWithAbort(
+            this.#fetch(url, {
+              headers: {
+                accept: "application/json",
+                "user-agent": this.#userAgent,
+              },
+              signal: requestSignal,
+            }),
+            requestSignal,
+          );
         } catch (error) {
-          if (signal.aborted) throw abortReason(signal);
+          if (requestSignal.aborted) throw abortReason(requestSignal);
           if (error instanceof TypeError && attempt < 2) {
             await this.#wait(
               retryNumberForAttempt(attempt),
               undefined,
               requestDeadline,
-              toolDeadline,
-              signal,
+              requestSignal,
             );
             continue;
           }
@@ -160,18 +189,18 @@ export class JsonHttpClient {
                   retryNumberForAttempt(attempt),
                   response.headers.get("retry-after") ?? undefined,
                   requestDeadline,
-                  toolDeadline,
-                  signal,
+                  requestSignal,
                 );
               } catch (error) {
                 if (
                   response.status === 429 &&
-                  (error instanceof RetryRejectedError ||
-                    (error instanceof ToolFailure && error.code === "UPSTREAM_TIMEOUT"))
+                  error instanceof ToolFailure &&
+                  (error.code === "UPSTREAM_TIMEOUT" ||
+                    error.code === "UPSTREAM_INVALID_RESPONSE")
                 ) {
                   throw new ToolFailure(
                     "UPSTREAM_RATE_LIMITED",
-                    "The Wiki asked the client to retry after the remaining time budget.",
+                    "The Wiki rate-limit response could not be retried safely.",
                     { cause: error },
                   );
                 }
@@ -188,15 +217,18 @@ export class JsonHttpClient {
           );
         }
 
-        const body = await readJsonBody(response, this.#maximumResponseBytes);
+        const body = await readJsonBody(
+          response,
+          this.#maximumResponseBytes,
+          requestSignal,
+        );
         if (isMaxlag(body.data)) {
           if (attempt < 2) {
             await this.#wait(
               retryNumberForAttempt(attempt),
-              undefined,
+              response.headers.get("retry-after") ?? undefined,
               requestDeadline,
-              toolDeadline,
-              signal,
+              requestSignal,
             );
             continue;
           }
@@ -225,6 +257,7 @@ export class JsonHttpClient {
 
       throw new ToolFailure("UPSTREAM_UNAVAILABLE", "The Wiki request failed.");
     } finally {
+      requestGuard.dispose();
       release();
     }
   }
@@ -233,7 +266,6 @@ export class JsonHttpClient {
     retryNumber: 1 | 2,
     retryAfter: string | undefined,
     requestDeadline: Deadline,
-    toolDeadline: Deadline,
     signal: AbortSignal,
   ): Promise<void> {
     try {
@@ -242,13 +274,20 @@ export class JsonHttpClient {
         ...(retryAfter === undefined ? {} : { retryAfter }),
         clock: this.#clock,
         requestDeadline,
-        toolDeadline,
+        toolDeadline: requestDeadline,
         signal,
       });
     } catch (error) {
       if (signal.aborted) throw abortReason(signal);
       if (error instanceof RetryRejectedError && error.reason === "insufficient-budget") {
         throw timeoutFailure(error);
+      }
+      if (error instanceof RetryRejectedError && error.reason === "invalid-retry-after") {
+        throw new ToolFailure(
+          "UPSTREAM_INVALID_RESPONSE",
+          "The Wiki returned an invalid Retry-After header.",
+          { cause: error },
+        );
       }
       throw error;
     }
@@ -258,6 +297,7 @@ export class JsonHttpClient {
 async function readJsonBody(
   response: Response,
   maximumResponseBytes: number,
+  signal: AbortSignal,
 ): Promise<{ data: unknown; byteLength: number }> {
   const declaredLength = Number.parseInt(response.headers.get("content-length") ?? "", 10);
   if (Number.isFinite(declaredLength) && declaredLength > maximumResponseBytes) {
@@ -270,19 +310,27 @@ async function readJsonBody(
   let byteLength = 0;
 
   if (reader) {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      byteLength += value.byteLength;
-      if (byteLength > maximumResponseBytes) {
-        try {
-          await reader.cancel();
-        } catch {
-          // The size failure is authoritative even if stream cancellation fails.
+    try {
+      while (true) {
+        const { done, value } = await raceWithAbort(reader.read(), signal);
+        if (done) break;
+        byteLength += value.byteLength;
+        if (byteLength > maximumResponseBytes) {
+          void reader.cancel().catch(() => {
+            // The size failure is authoritative even if stream cancellation fails.
+          });
+          throw new ToolFailure("RESPONSE_TOO_LARGE", "The Wiki response exceeded 5 MiB.");
         }
-        throw new ToolFailure("RESPONSE_TOO_LARGE", "The Wiki response exceeded 5 MiB.");
+        chunks.push(value);
       }
-      chunks.push(value);
+    } catch (error) {
+      if (signal.aborted) {
+        void reader.cancel().catch(() => {
+          // The deadline or cancellation reason remains authoritative.
+        });
+        throw abortReason(signal);
+      }
+      throw error;
     }
   }
 
@@ -337,16 +385,62 @@ function abortReason(signal: AbortSignal): unknown {
   return signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
 }
 
-async function cancelBody(response: Response): Promise<void> {
-  try {
-    await response.body?.cancel();
-  } catch {
+function cancelBody(response: Response): void {
+  void response.body?.cancel().catch(() => {
     // Discard failures must not replace the actual HTTP error.
-  }
+  });
 }
 
 function retryNumberForAttempt(attempt: number): 1 | 2 {
   if (attempt === 0) return 1;
   if (attempt === 1) return 2;
   throw new RangeError("No retry is available after the third attempt.");
+}
+
+interface DeadlineGuard {
+  signal: AbortSignal;
+  dispose(): void;
+}
+
+function createDeadlineGuard(
+  clock: Clock,
+  deadline: Deadline,
+  parentSignal?: AbortSignal,
+): DeadlineGuard {
+  const controller = new AbortController();
+  const onParentAbort = () => controller.abort(abortReason(parentSignal!));
+  if (parentSignal?.aborted) onParentAbort();
+  else parentSignal?.addEventListener("abort", onParentAbort, { once: true });
+
+  const cancelTimer = clock.schedule(deadline.remaining(), () => {
+    controller.abort(timeoutFailure());
+  });
+
+  return {
+    signal: controller.signal,
+    dispose() {
+      cancelTimer();
+      parentSignal?.removeEventListener("abort", onParentAbort);
+    },
+  };
+}
+
+function raceWithAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => finish(() => reject(abortReason(signal)));
+    let finished = false;
+    const finish = (callback: () => void) => {
+      if (finished) return;
+      finished = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    void operation.then(
+      (value) => finish(() => resolve(value)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
 }

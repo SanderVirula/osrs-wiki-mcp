@@ -53,6 +53,9 @@ test("Retry-After supports delta seconds and HTTP dates", () => {
   assert.equal(parseRetryAfter("Wed, 15 Jul 2026 00:00:03 GMT", wallNow), 3_000);
   assert.equal(parseRetryAfter("Wed, 14 Jul 2026 00:00:00 GMT", wallNow), 0);
   assert.equal(parseRetryAfter("not a date", wallNow), null);
+  assert.equal(parseRetryAfter("5.5", wallNow), null);
+  assert.equal(parseRetryAfter("-1", wallNow), null);
+  assert.equal(parseRetryAfter("2026-07-15T00:00:03.000Z", wallNow), null);
 });
 
 test("an invalid Retry-After fails closed without sleeping", async () => {
@@ -152,6 +155,29 @@ test("single-flight aborts the underlying operation after every subscriber cance
   assert.equal(underlyingSignal?.aborted, true);
 });
 
+test("a subscriber arriving after the previous flight abort starts a fresh operation", async () => {
+  const flight = new SingleFlight<string, string>();
+  const staleOperation = deferred<string>();
+  const firstController = new AbortController();
+  let starts = 0;
+
+  const first = flight.run("same", firstController.signal, () => {
+    starts += 1;
+    return staleOperation.promise;
+  });
+  firstController.abort(new Error("first caller cancelled"));
+  await assert.rejects(first, /first caller cancelled/);
+
+  const second = flight.run("same", undefined, async () => {
+    starts += 1;
+    return "fresh";
+  });
+  staleOperation.resolve("stale");
+
+  assert.equal(await second, "fresh");
+  assert.equal(starts, 2);
+});
+
 test("the semaphore grants only one upstream slot at a time", async () => {
   const semaphore = new Semaphore(1);
   const firstRelease = await semaphore.acquire();
@@ -167,6 +193,21 @@ test("the semaphore grants only one upstream slot at a time", async () => {
   const secondRelease = await second;
   assert.equal(secondGranted, true);
   secondRelease();
+});
+
+test("an aborted semaphore waiter is removed without blocking the next waiter", async () => {
+  const semaphore = new Semaphore(1);
+  const firstRelease = await semaphore.acquire();
+  const waitingController = new AbortController();
+  const abortedWaiter = semaphore.acquire(waitingController.signal);
+  const nextWaiter = semaphore.acquire();
+
+  waitingController.abort(new Error("queued caller cancelled"));
+  await assert.rejects(abortedWaiter, /queued caller cancelled/);
+  firstRelease();
+
+  const nextRelease = await nextWaiter;
+  nextRelease();
 });
 
 test("JsonHttpClient serializes distinct upstream requests globally", async () => {
@@ -206,39 +247,111 @@ test("JsonHttpClient serializes distinct upstream requests globally", async () =
   assert.equal(maximumActive, 1);
 });
 
-test("queue time consumes the waiting caller's tool budget", async () => {
+test("JsonHttpClient isolates sibling cancellation on a deduplicated request", async () => {
   const clock = new FakeClock();
-  const firstClock = new FakeClock();
-  const releaseFirst = deferred<void>();
-  let fetches = 0;
-  const fetchImpl: typeof fetch = async () => {
-    fetches += 1;
-    if (fetches === 1) await releaseFirst.promise;
-    return jsonResponse({ ok: true });
+  const response = deferred<Response>();
+  const firstController = new AbortController();
+  let attempts = 0;
+  let upstreamSignal: AbortSignal | null = null;
+  const client = new JsonHttpClient({
+    clock,
+    fetchImpl: async (_input, init) => {
+      attempts += 1;
+      upstreamSignal = init?.signal ?? null;
+      return response.promise;
+    },
+  });
+  const options = {
+    cacheKey: "shared",
+    toolDeadline: Deadline.after(clock, 30_000),
+    validate: (input: unknown) => input as { ok: boolean },
   };
-  const client = new JsonHttpClient({ fetchImpl, clock });
+
+  const first = client.request("https://example.test/shared", {
+    ...options,
+    signal: firstController.signal,
+  });
+  const second = client.request("https://example.test/shared", options);
+  while (attempts < 1) await Promise.resolve();
+
+  firstController.abort(new Error("first caller cancelled"));
+  await assert.rejects(first, /first caller cancelled/);
+  assert.equal((upstreamSignal as AbortSignal | null)?.aborted, false);
+
+  response.resolve(jsonResponse({ ok: true }));
+  assert.deepEqual((await second).data, { ok: true });
+  assert.equal(attempts, 1);
+});
+
+test("deduplicated subscribers retain independent tool deadlines", async () => {
+  const clock = new FakeClock();
+  const response = deferred<Response>();
+  let attempts = 0;
+  const client = new JsonHttpClient({
+    clock,
+    fetchImpl: async () => {
+      attempts += 1;
+      return response.promise;
+    },
+  });
+  const nearlyExpiredDeadline = Deadline.after(clock, 30_000);
+  clock.advance(25_000);
   const validate = (input: unknown) => input as { ok: boolean };
-  const first = client.request("https://example.test/one", {
-    cacheKey: "one",
-    toolDeadline: Deadline.after(firstClock, 30_000),
+
+  const first = client.request("https://example.test/shared-deadline", {
+    cacheKey: "shared-deadline",
+    toolDeadline: nearlyExpiredDeadline,
     validate,
   });
+  const second = client.request("https://example.test/shared-deadline", {
+    cacheKey: "shared-deadline",
+    toolDeadline: Deadline.after(clock, 30_000),
+    validate,
+  });
+  while (attempts < 1) await Promise.resolve();
+
+  clock.advance(5_000);
+  response.resolve(jsonResponse({ ok: true }));
+  const [firstResult, secondResult] = await Promise.allSettled([first, second]);
+
+  assert.equal(firstResult.status, "rejected");
+  assert.ok(
+    firstResult.status === "rejected" &&
+      firstResult.reason instanceof ToolFailure &&
+      firstResult.reason.code === "UPSTREAM_TIMEOUT",
+  );
+  assert.equal(secondResult.status, "fulfilled");
+  assert.equal(attempts, 1);
+});
+
+test("queue time consumes the waiting caller's tool budget", async () => {
+  const clock = new FakeClock();
+  const semaphore = new Semaphore(1);
+  const releaseUpstreamSlot = await semaphore.acquire();
+  let fetches = 0;
+  const client = new JsonHttpClient({
+    clock,
+    semaphore,
+    fetchImpl: async () => {
+      fetches += 1;
+      return jsonResponse({ ok: true });
+    },
+  });
+  const validate = (input: unknown) => input as { ok: boolean };
   const waiting = client.request("https://example.test/two", {
     cacheKey: "two",
     toolDeadline: Deadline.after(clock, 30_000),
     validate,
   });
 
-  while (fetches < 1) await Promise.resolve();
   clock.advance(30_001);
-  releaseFirst.resolve();
-  await first;
+  releaseUpstreamSlot();
 
   await assert.rejects(
     waiting,
     (error: unknown) => error instanceof ToolFailure && error.code === "UPSTREAM_TIMEOUT",
   );
-  assert.equal(fetches, 1);
+  assert.equal(fetches, 0);
 });
 
 test("transient network and HTTP failures retry at most twice", async () => {
@@ -263,6 +376,29 @@ test("transient network and HTTP failures retry at most twice", async () => {
   assert.deepEqual(clock.sleeps, [300, 550]);
 });
 
+test("an honored Retry-After delay is never shortened", async () => {
+  const clock = new FakeClock();
+  let attempts = 0;
+  const client = new JsonHttpClient({
+    clock,
+    fetchImpl: async () => {
+      attempts += 1;
+      return attempts === 1
+        ? jsonResponse({}, { status: 429, headers: { "retry-after": "1" } })
+        : jsonResponse({ ok: true });
+    },
+  });
+
+  await client.request("https://example.test/honored-retry-after", {
+    cacheKey: "honored-retry-after",
+    toolDeadline: Deadline.after(clock, 30_000),
+    validate: (input) => input,
+  });
+
+  assert.equal(attempts, 2);
+  assert.deepEqual(clock.sleeps, [1_000]);
+});
+
 test("Retry-After beyond budget does not sleep or retry", async () => {
   const clock = new FakeClock();
   let attempts = 0;
@@ -282,6 +418,30 @@ test("Retry-After beyond budget does not sleep or retry", async () => {
     }),
     (error: unknown) =>
       error instanceof ToolFailure && error.code === "UPSTREAM_RATE_LIMITED",
+  );
+  assert.equal(attempts, 1);
+  assert.deepEqual(clock.sleeps, []);
+});
+
+test("an invalid Retry-After on a retryable server error maps to a stable upstream code", async () => {
+  const clock = new FakeClock();
+  let attempts = 0;
+  const client = new JsonHttpClient({
+    clock,
+    fetchImpl: async () => {
+      attempts += 1;
+      return jsonResponse({}, { status: 503, headers: { "retry-after": "5.5" } });
+    },
+  });
+
+  await assert.rejects(
+    client.request("https://example.test/invalid-retry-after", {
+      cacheKey: "invalid-retry-after",
+      toolDeadline: Deadline.after(clock, 30_000),
+      validate: (input) => input,
+    }),
+    (error: unknown) =>
+      error instanceof ToolFailure && error.code === "UPSTREAM_INVALID_RESPONSE",
   );
   assert.equal(attempts, 1);
   assert.deepEqual(clock.sleeps, []);
@@ -391,6 +551,81 @@ test("the decompressed response stream stops above 5 MiB", async () => {
   );
 });
 
+test("a hung fetch is aborted when the logical request budget expires", async () => {
+  const clock = new FakeClock();
+  const cleanup = new AbortController();
+  let attempts = 0;
+  let upstreamSignal: AbortSignal | null = null;
+  const client = new JsonHttpClient({
+    clock,
+    fetchImpl: async (_input, init) => {
+      attempts += 1;
+      upstreamSignal = init?.signal ?? null;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+          once: true,
+        });
+      });
+    },
+  });
+  const request = client.request("https://example.test/hung", {
+    cacheKey: "hung",
+    signal: cleanup.signal,
+    toolDeadline: Deadline.after(clock, 30_000),
+    validate: (input) => input,
+  });
+
+  try {
+    while (attempts < 1) await Promise.resolve();
+    clock.advance(20_000);
+    await assert.rejects(
+      request,
+      (error: unknown) =>
+        error instanceof ToolFailure && error.code === "UPSTREAM_TIMEOUT",
+    );
+    assert.equal((upstreamSignal as AbortSignal | null)?.aborted, true);
+  } finally {
+    cleanup.abort(new Error("test cleanup"));
+    await Promise.allSettled([request]);
+  }
+});
+
+test("a stalled response body is aborted when the logical request budget expires", async () => {
+  const clock = new FakeClock();
+  let bodyCancelled = false;
+  const bodyReadStarted = deferred<void>();
+  const client = new JsonHttpClient({
+    clock,
+    fetchImpl: async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull() {
+            bodyReadStarted.resolve();
+            // Leave the body pending until the request deadline fires.
+          },
+          cancel() {
+            bodyCancelled = true;
+          },
+        }),
+        { headers: { "content-type": "application/json" } },
+      ),
+  });
+  const request = client.request("https://example.test/stalled-body", {
+    cacheKey: "stalled-body",
+    toolDeadline: Deadline.after(clock, 30_000),
+    validate: (input) => input,
+  });
+
+  await bodyReadStarted.promise;
+  clock.advance(20_000);
+  await assert.rejects(
+    request,
+    (error: unknown) =>
+      error instanceof ToolFailure && error.code === "UPSTREAM_TIMEOUT",
+  );
+  assert.equal(bodyCancelled, true);
+});
+
 test("caller cancellation is never retried", async () => {
   const controller = new AbortController();
   let attempts = 0;
@@ -434,15 +669,19 @@ test("only envelope-valid JSON is cached and normalization failures do not evict
     return { rows: value.rows };
   };
 
-  const first = await client.request("https://example.test/cache", {
-    cacheKey: "cache",
-    toolDeadline: Deadline.after(clock, 30_000),
-    validate,
-  });
-  assert.throws(() => {
-    void first;
-    throw new Error("downstream normalization failed");
-  });
+  let firstFetchedAt = "";
+  await assert.rejects(
+    async () => {
+      const envelope = await client.request("https://example.test/cache", {
+        cacheKey: "cache",
+        toolDeadline: Deadline.after(clock, 30_000),
+        validate,
+      });
+      firstFetchedAt = envelope.fetchedAt;
+      throw new Error("downstream normalization failed");
+    },
+    /downstream normalization failed/,
+  );
   const second = await client.request("https://example.test/cache", {
     cacheKey: "cache",
     toolDeadline: Deadline.after(clock, 30_000),
@@ -451,7 +690,7 @@ test("only envelope-valid JSON is cached and normalization failures do not evict
 
   assert.equal(fetches, 1);
   assert.equal(second.fromCache, true);
-  assert.equal(second.fetchedAt, first.fetchedAt);
+  assert.equal(second.fetchedAt, firstFetchedAt);
 });
 
 test("an envelope rejected by its validator is not cached", async () => {

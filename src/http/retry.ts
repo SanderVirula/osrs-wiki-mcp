@@ -28,11 +28,28 @@ export function defaultRetryDelay(retryNumber: number, random: number): number {
 
 export function parseRetryAfter(value: string, wallNow: number): number | null {
   const trimmed = value.trim();
-  if (/^\d+$/.test(trimmed)) return Number.parseInt(trimmed, 10) * 1_000;
+  if (/^\d+$/.test(trimmed)) {
+    const seconds = Number(trimmed);
+    return Number.isSafeInteger(seconds) ? seconds * 1_000 : null;
+  }
+
+  if (!isHttpDate(trimmed)) return null;
 
   const timestamp = Date.parse(trimmed);
   if (!Number.isFinite(timestamp)) return null;
   return Math.max(0, timestamp - wallNow);
+}
+
+function isHttpDate(value: string): boolean {
+  const weekday = "(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)";
+  const longWeekday = "(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)";
+  const month = "(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)";
+  const time = "\\d{2}:\\d{2}:\\d{2}";
+  return (
+    new RegExp(`^${weekday}, \\d{2} ${month} \\d{4} ${time} GMT$`).test(value) ||
+    new RegExp(`^${longWeekday}, \\d{2}-${month}-\\d{2} ${time} GMT$`).test(value) ||
+    new RegExp(`^${weekday} ${month} (?: \\d|\\d{2}) ${time} \\d{4}$`).test(value)
+  );
 }
 
 export interface WaitForRetryOptions {

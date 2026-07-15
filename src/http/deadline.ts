@@ -1,10 +1,14 @@
 import { setTimeout as delay } from "node:timers/promises";
+import { clearTimeout, setTimeout } from "node:timers";
+
+export type CancelScheduledTask = () => void;
 
 export interface Clock {
   now(): number;
   wallNow(): number;
   random(): number;
   sleep(milliseconds: number, signal?: AbortSignal): Promise<void>;
+  schedule(milliseconds: number, callback: () => void): CancelScheduledTask;
 }
 
 export const systemClock: Clock = {
@@ -13,6 +17,10 @@ export const systemClock: Clock = {
   random: () => Math.random(),
   async sleep(milliseconds, signal) {
     await delay(milliseconds, undefined, signal ? { signal } : undefined);
+  },
+  schedule(milliseconds, callback) {
+    const timer = setTimeout(callback, milliseconds);
+    return () => clearTimeout(timer);
   },
 };
 
