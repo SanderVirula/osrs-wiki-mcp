@@ -475,6 +475,12 @@ test("plugin configuration contains no mutable pins, secrets, writes, or persona
   assert.doesNotMatch(text, /"(env|hooks|apps|monitors|commands)"\s*:/u);
   assert.doesNotMatch(text, /progression-aware|player-ready|write access/iu);
 });
+
+test("trusted staged publishing uses a compatible pinned npm CLI", async () => {
+  const workflow = await loadText(".github/workflows/publish.yml");
+  assert.match(workflow, /npm install --global npm@11\.16\.0/u);
+  assert.match(workflow, /npm stage publish/u);
+});
 ```
 
 - [ ] **Step 3: Run the test and verify it fails for missing manifests**
@@ -508,6 +514,7 @@ Do not commit this task separately while red. Carry the test into Task 4.
 - Create: `.agents/plugins/marketplace.json`
 - Create: `.claude-plugin/marketplace.json`
 - Create: `gemini-extension.json`
+- Modify: `.github/workflows/publish.yml`
 - Modify: `package.json`
 - Modify: `package-lock.json`
 - Test: `test/plugin-bundle.test.ts`
@@ -664,7 +671,15 @@ Create `gemini-extension.json`:
 
 Do not create `GEMINI.md`; the lazy `skills/` directory is the guidance surface.
 
-- [ ] **Step 5: Turn the bundle tests green**
+- [ ] **Step 5: Pin the staged-publishing npm CLI before verification**
+
+In `.github/workflows/publish.yml`, immediately after `actions/setup-node`, add
+an explicit `npm install --global npm@11.16.0` step and a step that asserts
+`npm --version` is exactly `11.16.0`. Keep `npm stage publish` as the final
+staged action. Recheck the official staged-publishing minimum immediately before
+implementation; changing this pin requires a reviewed plan update.
+
+- [ ] **Step 6: Turn the bundle tests green**
 
 Run:
 
@@ -678,7 +693,7 @@ Expected: bundle tests pass and the complete suite remains green. The Codex
 source path must remain non-root and both compatibility mirrors must be
 byte-identical to their canonical files.
 
-- [ ] **Step 6: Run native validators and an actual Codex install smoke**
+- [ ] **Step 7: Run native validators and an actual Codex install smoke**
 
 Run:
 
@@ -698,10 +713,10 @@ Expected: both validators pass with no warnings and the real Codex
 marketplace/install flow succeeds. Treat an evolving platform schema mismatch
 as a design change, not a reason to suppress validation.
 
-- [ ] **Step 7: Commit the complete bundle**
+- [ ] **Step 8: Commit the complete bundle**
 
 ```powershell
-git add -- package.json package-lock.json test/plugin-bundle.test.ts .mcp.json plugins/osrs-wiki-mcp .claude-plugin .agents gemini-extension.json
+git add -- package.json package-lock.json test/plugin-bundle.test.ts .mcp.json plugins/osrs-wiki-mcp .claude-plugin .agents gemini-extension.json .github/workflows/publish.yml
 git commit -m "feat: add cross-agent OSRS Wiki plugin"
 ```
 
