@@ -1,7 +1,7 @@
 # OSRS Wiki MCP Cross-Agent Plugin Design
 
 **Status:** Proposed for independent reviewer-agent approval
-**Date:** 2026-07-15  
+**Date:** 2026-07-15
 **Repository:** `SanderVirula/osrs-wiki-mcp`
 
 ## Purpose
