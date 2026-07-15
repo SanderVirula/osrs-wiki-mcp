@@ -1,8 +1,5 @@
 # OSRS Wiki MCP
 
-> Unreleased. The implementation is being verified before its first public
-> GitHub and npm release.
-
 A stateless, local [Model Context Protocol](https://modelcontextprotocol.io/)
 server that turns Old School RuneScape Wiki data into bounded semantic
 responses with validated structured content and source provenance.
@@ -12,21 +9,21 @@ responses with validated structured content and source provenance.
 Node.js 24 or newer is required. The executable prints a concise upgrade
 message on older supported runtimes.
 
-Until the npm release exists, install from a local checkout:
-
-```powershell
-npm.cmd ci --ignore-scripts
-npm.cmd run build
-node dist/index.js
-```
-
-Once version 1.0.0 is published, an MCP client can use this pinned command:
+Configure an MCP client to use the pinned npm release:
 
 ```json
 {
   "command": "npx",
   "args": ["-y", "osrs-wiki-mcp@1.0.0"]
 }
+```
+
+To run the server from a source checkout instead:
+
+```powershell
+npm.cmd ci --ignore-scripts
+npm.cmd run build
+node dist/index.js
 ```
 
 The server speaks MCP over standard input/output. Standard output is reserved
