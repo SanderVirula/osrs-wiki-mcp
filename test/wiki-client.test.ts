@@ -277,6 +277,41 @@ test("a later Bucket page failure returns earlier rows with the exact recovery w
   );
 });
 
+test("an HTTP-200 Wiki error envelope is not cached and a same-call retry refetches it", async () => {
+  const clock = new FakeClock();
+  let fetches = 0;
+  const client = new WikiClient(
+    new JsonHttpClient({
+      clock,
+      fetchImpl: async () => {
+        fetches += 1;
+        if (fetches === 1) {
+          return jsonResponse(syntheticBucketEnvelope(syntheticBucketRows(500)));
+        }
+        if (fetches === 2) {
+          return jsonResponse({
+            error: {
+              code: "internal_api_error_DBQueryError",
+              info: "Synthetic transient failure",
+            },
+          });
+        }
+        return jsonResponse(syntheticBucketEnvelope(syntheticBucketRows(1, 500)));
+      },
+    }),
+  );
+  const spec = { bucket: "dropsline", select: ["page_name", "json"] } as const;
+
+  const partial = await client.bucketAll(spec, createContext(clock));
+  const recovered = await client.bucketAll(spec, createContext(clock));
+
+  assert.equal(partial.rows.length, 500);
+  assert.equal(partial.incomplete, true);
+  assert.equal(recovered.rows.length, 501);
+  assert.equal(recovered.incomplete, false);
+  assert.equal(fetches, 3);
+});
+
 test("a first Bucket page failure throws instead of returning an empty-looking success", async () => {
   const clock = new FakeClock();
   const client = new WikiClient(

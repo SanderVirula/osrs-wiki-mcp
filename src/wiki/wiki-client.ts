@@ -143,6 +143,7 @@ export class WikiClient {
       cacheKey: `search:${url}`,
       toolDeadline: context.toolDeadline,
       validate: (value) => SearchEnvelopeSchema.parse(value),
+      admit: (value) => !isApiError(value),
       ...(context.signal ? { signal: context.signal } : {}),
     });
     if (isApiError(envelope.data)) throw apiFailure(envelope.data.error.code);
@@ -215,6 +216,7 @@ export class WikiClient {
       cacheKey: `parse:${url}`,
       toolDeadline: context.toolDeadline,
       validate: (value) => validateParseEnvelope(value, requestedProps),
+      admit: (value) => !isApiError(value),
       ...(context.signal ? { signal: context.signal } : {}),
     });
     if (isApiError(envelope.data)) throw apiFailure(envelope.data.error.code);
@@ -259,6 +261,7 @@ export class WikiClient {
       cacheKey: `bucket:${url}`,
       toolDeadline: context.toolDeadline,
       validate: (value) => BucketEnvelopeSchema.parse(value),
+      admit: (value) => !isApiError(value),
       ...(context.signal ? { signal: context.signal } : {}),
     });
     if (isApiError(envelope.data)) throw apiFailure(envelope.data.error.code);

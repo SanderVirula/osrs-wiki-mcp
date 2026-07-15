@@ -33,6 +33,8 @@ export interface JsonRequestOptions<T> {
   cacheKey: string;
   toolDeadline: Deadline;
   validate(value: unknown): T;
+  /** Optional domain policy applied after envelope validation and before cache admission. */
+  admit?(value: T): boolean;
   signal?: AbortSignal;
 }
 
@@ -99,7 +101,10 @@ export class JsonHttpClient {
             underlyingSignal,
             options.validate,
           );
-          this.#cache.set(options.cacheKey, envelope);
+          const validated = options.validate(envelope.data);
+          if (options.admit?.(validated) ?? true) {
+            this.#cache.set(options.cacheKey, envelope);
+          }
           return { envelope, fromCache: false };
         },
       );
