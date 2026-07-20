@@ -429,10 +429,34 @@ test("one rendered MCP config connects both servers and is identical for both ar
     const casesPath = fileURLToPath(
       new URL("../../evals/osrs-wiki-research/product-contract-v2-cases.json", import.meta.url),
     );
+    const configHash = createHash("sha256").update(configText, "utf8").digest("hex").toUpperCase();
+    const suite = await loadJson<{
+      protocol: {
+        preregisteredDependencies: {
+          renderedMcpConfigSha256: string;
+          distRuntimeAggregateSha256: string;
+        };
+      };
+    }>("product-contract-v2-cases.json");
+    let contractCasesPath = casesPath;
+    if (process.platform === "win32") {
+      assert.equal(
+        configHash,
+        suite.protocol.preregisteredDependencies.renderedMcpConfigSha256,
+      );
+    } else {
+      // The superseded preregistration deliberately preserves the Windows-rendered
+      // config, including absolute Node and fixture paths. Exercise the same runner
+      // on other platforms with only that path-dependent hash replaced in a temp copy.
+      const platformSuite = structuredClone(suite);
+      platformSuite.protocol.preregisteredDependencies.renderedMcpConfigSha256 = configHash;
+      contractCasesPath = join(root, "platform-product-contract-v2-cases.json");
+      await writeFile(contractCasesPath, `${JSON.stringify(platformSuite, null, 2)}\n`, "utf8");
+    }
     const contractResult = spawnSync(process.execPath, [
       runnerPath,
       "--print-run-contract",
-      casesPath,
+      contractCasesPath,
       configPath,
     ], { encoding: "utf8" });
     assert.equal(contractResult.status, 0, contractResult.stderr);
@@ -444,13 +468,7 @@ test("one rendered MCP config connects both servers and is identical for both ar
     };
     assert.equal(contract.mcpConfigForArms.baseline, contract.mcpConfigForArms.treatment);
     assert.equal(contract.toolAllowlist.length, 11);
-    assert.equal(
-      contract.mcpConfigSha256,
-      createHash("sha256").update(configText, "utf8").digest("hex").toUpperCase(),
-    );
-    const suite = await loadJson<{
-      protocol: { preregisteredDependencies: { distRuntimeAggregateSha256: string } };
-    }>("product-contract-v2-cases.json");
+    assert.equal(contract.mcpConfigSha256, configHash);
     assert.match(contract.distRuntimeAggregateSha256, /^[A-F0-9]{64}$/u);
     assert.equal(
       contract.distRuntimeAggregateSha256,
