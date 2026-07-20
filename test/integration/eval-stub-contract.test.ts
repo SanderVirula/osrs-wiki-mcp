@@ -28,6 +28,7 @@ interface EvalCase {
   id: string;
   prompt: string;
   scenario: string;
+  requiredToolSequence: string[];
   requiredAnswerBehaviors: string[];
   forbiddenAnswerBehaviors: string[];
 }
@@ -330,7 +331,9 @@ test("product-contract scoring and audit preserve the external MCP call", async 
       scoringViewFile: string;
     }>;
     assert.equal(scoringIndex.length, 1);
-    const scoringView = JSON.parse(await readFile(scoringIndex[0].scoringViewFile, "utf8")) as {
+    const [scoringEntry] = scoringIndex;
+    assert.ok(scoringEntry);
+    const scoringView = JSON.parse(await readFile(scoringEntry.scoringViewFile, "utf8")) as {
       mcpCalls: Array<{ name: string }>;
     };
     assert.deepEqual(scoringView.mcpCalls.map(({ name }) => name), [
@@ -339,7 +342,7 @@ test("product-contract scoring and audit preserve the external MCP call", async 
 
     const scoresPath = join(root, "scores.json");
     await writeFile(scoresPath, JSON.stringify({ scores: [{
-      viewId: scoringIndex[0].viewId,
+      viewId: scoringEntry.viewId,
       total: 10,
       dimensions: [2, 2, 2, 2, 2],
       forbiddenPass: true,
@@ -391,7 +394,10 @@ test("one rendered MCP config connects both servers and is identical for both ar
 
     const configText = await readFile(configPath, "utf8");
     const config = JSON.parse(configText) as {
-      mcpServers: Record<string, { command: string; args: string[] }>;
+      mcpServers: {
+        "osrs-wiki": { command: string; args: string[] };
+        "external-dps": { command: string; args: string[] };
+      };
     };
     assert.deepEqual(Object.keys(config.mcpServers), ["osrs-wiki", "external-dps"]);
     assert.equal(config.mcpServers["osrs-wiki"].command, process.execPath);

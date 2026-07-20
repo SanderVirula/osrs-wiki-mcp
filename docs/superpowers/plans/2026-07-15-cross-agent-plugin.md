@@ -481,6 +481,13 @@ sets. The otherwise-identical plugin manifests remain frozen at
 
 The integration contract test is frozen at
 `72E808184138F064C63DD2CD8AF0E8FC7C79EB689139982BE2322EA0FE320AF4`.
+Task 4's strict typecheck exposed incomplete local test annotations in that
+snapshot. Type-only declarations and post-assertion narrowing were added
+without changing prompts, fixtures, assertions, or runtime behavior; the
+current contract hashes to
+`4C8D23BCA276A62F9373A546E67F7C78DD700486B0676016C417576B1245613F`.
+The reviewed original remains preserved in commit `ebbae13`; the current
+version is covered by the final fresh-context review.
 The three prior failed summaries are anchored by commit `e62a3d6` and hash to
 `099706B2DCFE540AE2784C2B0B16FAA46F076B3458E3417BDE957F00E948963B`,
 `6D60A12F4038C1CA1A3974C77E78A7F674181A180E1A2027F7BB0C68F5A7E6FB`,
