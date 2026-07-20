@@ -29,6 +29,9 @@ claude plugin marketplace add SanderVirula/osrs-wiki-mcp@v1.1.0 --scope user
 claude plugin install osrs-wiki-mcp@sander-virula-osrs --scope user
 ```
 
+The marketplace install and bare-`npx` launcher were verified with Claude Code
+2.1.215 on Windows. This is a tested baseline, not an inferred minimum.
+
 Gemini CLI:
 
 ```powershell
