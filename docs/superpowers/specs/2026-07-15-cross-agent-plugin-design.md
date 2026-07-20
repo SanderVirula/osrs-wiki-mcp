@@ -113,7 +113,7 @@ copies byte-for-byte.
 Codex and Claude use separate marketplace files because their catalog schemas
 are incompatible. Both catalogs identify `osrs-wiki-mcp`; Claude uses the
 repository root (`./`) while Codex uses `./plugins/osrs-wiki-mcp`. Their
-marketplace name is `ssanderv-osrs`.
+marketplace name is `osrs-wiki`.
 
 ## Component Contracts
 

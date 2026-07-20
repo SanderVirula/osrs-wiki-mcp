@@ -1,7 +1,7 @@
 {
-  "name": "ssanderv-osrs",
+  "name": "osrs-wiki",
   "interface": {
-    "displayName": "SSanderV OSRS"
+    "displayName": "OSRS Wiki MCP"
   },
   "plugins": [
     {

@@ -98,7 +98,7 @@ test("marketplaces expose the supported plugin roots once", async () => {
     plugins: Array<{ name: string; source: string }>;
   }>(".claude-plugin/marketplace.json");
 
-  assert.equal(codex.name, "ssanderv-osrs");
+  assert.equal(codex.name, "osrs-wiki");
   assert.deepEqual(
     codex.plugins.map(({ name }) => name),
     ["osrs-wiki-mcp"],
@@ -108,10 +108,10 @@ test("marketplaces expose the supported plugin roots once", async () => {
     path: "./plugins/osrs-wiki-mcp",
   });
   assert.ok(codex.plugins[0]?.policy);
-  assert.equal(claude.name, "ssanderv-osrs");
+  assert.equal(claude.name, "osrs-wiki");
   assert.equal(
     claude.description,
-    "OSRS Wiki MCP plugins by SSanderV.",
+    "OSRS Wiki MCP plugin marketplace.",
   );
   assert.deepEqual(claude.plugins, [
     {

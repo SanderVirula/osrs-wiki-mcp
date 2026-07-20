@@ -19,14 +19,14 @@ Codex:
 
 ```powershell
 codex plugin marketplace add SSanderV/osrs-wiki-mcp --ref v1.1.1
-codex plugin add osrs-wiki-mcp@ssanderv-osrs
+codex plugin add osrs-wiki-mcp@osrs-wiki
 ```
 
 Claude Code:
 
 ```powershell
 claude plugin marketplace add SSanderV/osrs-wiki-mcp@v1.1.1 --scope user
-claude plugin install osrs-wiki-mcp@ssanderv-osrs --scope user
+claude plugin install osrs-wiki-mcp@osrs-wiki --scope user
 ```
 
 The marketplace install and bare-`npx` launcher were verified with Claude Code

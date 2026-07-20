@@ -1,6 +1,6 @@
 {
-  "name": "ssanderv-osrs",
-  "description": "OSRS Wiki MCP plugins by SSanderV.",
+  "name": "osrs-wiki",
+  "description": "OSRS Wiki MCP plugin marketplace.",
   "owner": {
     "name": "SSanderV"
   },
